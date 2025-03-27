@@ -63,10 +63,10 @@ X_test_vect = vectorizer.transform(X_test)
 
 # 4. Búsqueda de hiperparámetros para Random Forest
 param_grid = {
-    'n_estimators': [100, 300, 500],
-    'max_depth': [None, 10, 20, 30],
-    'min_samples_split': [2, 5, 10],
-    'min_samples_leaf': [1, 2, 4]
+    'n_estimators': [300],
+    'max_depth': [None],
+    'min_samples_split': [2],
+    'min_samples_leaf': [1]
 }
 
 grid_search = GridSearchCV(
