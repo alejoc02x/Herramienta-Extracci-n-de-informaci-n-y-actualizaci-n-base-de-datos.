@@ -1,21 +1,27 @@
 import pandas as pd
 import re
+import nltk
+import joblib
+import matplotlib.pyplot as plt
+import seaborn as sns
+from nltk.corpus import stopwords
+from nltk.stem import SnowballStemmer
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.svm import SVC
+from sklearn.neural_network import MLPClassifier
+from xgboost import XGBClassifier
 from sklearn.metrics import classification_report, confusion_matrix
-import matplotlib.pyplot as plt
-import seaborn as sns
-import joblib
 
-# 1. Cargar el archivo Excel
-file_path = "D:/alejo/MINERIADATOS/ALERTAS DISPOSITIVOS MÉDICOS 2024.xlsx"  # Cambia esta ruta al archivo en tu entorno
-data = pd.ExcelFile(file_path)
+nltk.download('stopwords')
 
-# Leer la hoja relevante y limpiar las filas irrelevantes
-df = data.parse('ALERTAS 2024', skiprows=3)
+# --- 1. Cargar y limpiar datos ---
+file_path = "/content/ALERTAS DISPOSITIVOS MÉDICOS 2024.xlsx"
+xls = pd.ExcelFile(file_path)
+df = xls.parse('ALERTAS 2024', skiprows=3)
 
-# Renombrar las columnas para facilitar el manejo
 df.columns = [
     'Mes', 'Fecha Emision', 'Codigo Fuente', 'Fuente', 'Tipo Alerta',
     'Dispositivo/Equipo', 'Tipo Dispositivo', 'Registro INVIMA', 'Imagen',
@@ -23,88 +29,97 @@ df.columns = [
     'Aplicabilidad', 'Soporte'
 ]
 
-# Seleccionar solo las columnas necesarias y eliminar filas vacías
 df = df[['Dispositivo/Equipo', 'Tipo Dispositivo']].dropna()
+df['Tipo Dispositivo'] = df['Tipo Dispositivo'].astype(str).str.strip().str.lower().str.replace('ó', 'o')
+df = df[df['Tipo Dispositivo'] != 'tipo dispositivo']  # Eliminar fila de título accidental
 
-# 2. Limpieza del texto
-from nltk.corpus import stopwords
-from nltk.stem import SnowballStemmer
-import nltk
-nltk.download('stopwords')
-
+# --- 2. Preprocesamiento de texto ---
 spanish_stopwords = set(stopwords.words('spanish'))
 stemmer = SnowballStemmer('spanish')
 
 def limpiar_texto(texto):
-    texto = re.sub(r'\W', ' ', texto)  # Elimina caracteres especiales
-    texto = re.sub(r'\d', '', texto)  # Elimina dígitos
-    texto = texto.lower()             # Convierte a minúsculas
+    texto = re.sub(r'\W', ' ', texto)
+    texto = re.sub(r'\d', '', texto)
+    texto = texto.lower()
     palabras = texto.split()
-    palabras = [stemmer.stem(palabra) for palabra in palabras if palabra not in spanish_stopwords]
+    palabras = [stemmer.stem(p) for p in palabras if p not in spanish_stopwords]
     return ' '.join(palabras)
 
-df['Dispositivo/Equipo'] = df['Dispositivo/Equipo'].apply(limpiar_texto)
+df['Dispositivo/Equipo'] = df['Dispositivo/Equipo'].astype(str).apply(limpiar_texto)
 
-# Dividir los datos en entrenamiento y prueba
-X = df['Dispositivo/Equipo']  # Características
-y = df['Tipo Dispositivo']    # Etiquetas
+# --- 3. Dividir los datos ---
+X = df['Dispositivo/Equipo']
+y = df['Tipo Dispositivo']
 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.35, random_state=42)
+from sklearn.preprocessing import LabelEncoder
 
-# 3. Vectorización del texto
-vectorizer = TfidfVectorizer(
-    ngram_range=(1, 2),
-    max_features=10000,
-    min_df=2,
-    max_df=0.9
-)
+# Codificar etiquetas
+label_encoder = LabelEncoder()
+y = label_encoder.fit_transform(df['Tipo Dispositivo'])
+
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.35, random_state=42, stratify=y)
+
+# --- 4. Vectorización ---
+vectorizer = TfidfVectorizer(ngram_range=(1,2), max_features=10000, min_df=2, max_df=0.9)
 X_train_vect = vectorizer.fit_transform(X_train)
 X_test_vect = vectorizer.transform(X_test)
 
-# 4. Búsqueda de hiperparámetros para Random Forest
-param_grid = {
-    'n_estimators': [300],
-    'max_depth': [None],
-    'min_samples_split': [2],
-    'min_samples_leaf': [1]
+# --- 5. Definición de modelos y grids ---
+modelos = {
+    'RandomForest': (RandomForestClassifier(random_state=42), {
+        'n_estimators': [100, 300],
+        'max_depth': [None, 20],
+        'min_samples_split': [2, 5]
+    }),
+    'XGBoost': (XGBClassifier(use_label_encoder=False, eval_metric='mlogloss', random_state=42), {
+        'n_estimators': [100, 300],
+        'max_depth': [3, 6]
+    }),
+    'KNN': (KNeighborsClassifier(), {
+        'n_neighbors': [3, 5, 7],
+        'weights': ['uniform', 'distance']
+    }),
+    'SVM': (SVC(probability=True), {
+        'C': [0.1, 1, 10],
+        'kernel': ['linear', 'rbf']
+    }),
+    'MLP': (MLPClassifier(max_iter=500, random_state=42), {
+        'hidden_layer_sizes': [(100,), (50,50)],
+        'activation': ['relu', 'tanh']
+    }),
 }
 
-grid_search = GridSearchCV(
-    RandomForestClassifier(random_state=42),
-    param_grid,
-    cv=3,
-    scoring='f1_weighted',
-    n_jobs=-1
-)
+# --- 6. Entrenamiento y evaluación ---
+for nombre, (modelo, grid) in modelos.items():
+    print(f"\n📌 Entrenando modelo: {nombre}")
+    grid_search = GridSearchCV(modelo, grid, cv=3, scoring='f1_weighted', n_jobs=-1)
+    grid_search.fit(X_train_vect, y_train)
+    best_model = grid_search.best_estimator_
 
-# Entrenar el modelo con la búsqueda de hiperparámetros
-grid_search.fit(X_train_vect, y_train)
-best_model = grid_search.best_estimator_
+    y_pred = best_model.predict(X_test_vect)
+    print(f"🔎 Mejor configuración para {nombre}: {grid_search.best_params_}")
+    from sklearn.metrics import ConfusionMatrixDisplay
 
-# 5. Evaluar el modelo
-y_pred = best_model.predict(X_test_vect)
-print("Reporte de clasificación:\n", classification_report(y_test, y_pred))
+# Decodificar predicciones y reales
+    y_pred_labels = label_encoder.inverse_transform(y_pred)
+    y_test_labels = label_encoder.inverse_transform(y_test)
+    print(classification_report(y_test_labels, y_pred_labels))
 
-# Mostrar la matriz de confusión
-cm = confusion_matrix(y_test, y_pred)
-plt.figure(figsize=(8, 6))
-sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=best_model.classes_, yticklabels=best_model.classes_)
-plt.xlabel('Predicción')
-plt.ylabel('Real')
-plt.title('Matriz de Confusión')
-plt.show()
 
-# 6. Guardar el modelo y el vectorizador
-joblib.dump(best_model, 'modelo_dispositivos.pkl')          # Guarda el modelo entrenado
-joblib.dump(vectorizer, 'vectorizador_dispositivos.pkl')  # Guarda el vectorizador
+    # Matriz de confusión
+    cm = confusion_matrix(y_test, y_pred, labels=best_model.classes_)
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=best_model.classes_, yticklabels=best_model.classes_)
+    plt.title(f"Matriz de Confusión - {nombre}")
+    plt.xlabel("Predicción")
+    plt.ylabel("Real")
+    plt.tight_layout()
+    plt.show()
 
-# 7. Función para predecir nuevos tipos de dispositivos
-def predecir_tipo_dispositivo(texto):
-    texto_limpio = limpiar_texto(texto)
-    texto_vect = vectorizer.transform([texto_limpio])
-    return best_model.predict(texto_vect)[0]
+    # Guardar modelo y vectorizador
+    joblib.dump(best_model, f'modelo_{nombre}.pkl')
 
-# Ejemplo de predicción
-nuevo_dispositivo = "Monitor cardíaco de última generación"
-prediccion = predecir_tipo_dispositivo(nuevo_dispositivo)
-print(f"Predicción para '{nuevo_dispositivo}': {prediccion}")
+# Guardar vectorizador
+joblib.dump(vectorizer, 'vectorizador_dispositivos.pkl')
+
